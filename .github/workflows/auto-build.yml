@@ -1,0 +1,154 @@
+name: Sync upstream and publish automatic build
+
+on:
+  schedule:
+    - cron: '17 * * * *'
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: auto-build-master
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.repository == 'dmcdark/Wand-Enhancer' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      sha: ${{ steps.sync.outputs.sha }}
+      build: ${{ steps.sync.outputs.build }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          sparse-checkout: scripts/prune-auto-releases.ps1
+          sparse-checkout-cone-mode: false
+
+      - name: Sync master and check the last successful build
+        id: sync
+        shell: pwsh
+        env:
+          # Optional token is needed when upstream changes workflow files.
+          GH_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN || github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Merge upstream without force-resetting the fork's own workflow commits.
+          gh api --method POST "repos/$env:GH_REPO/merge-upstream" -f branch=master
+          if ($LASTEXITCODE -ne 0) { throw 'Upstream sync failed; master was not force-reset.' }
+
+          $sha = gh api "repos/$env:GH_REPO/commits/master" --jq .sha
+          if ($LASTEXITCODE -ne 0) { throw 'Could not read the synchronized commit.' }
+
+          $json = gh api --paginate --slurp "repos/$env:GH_REPO/releases?per_page=100"
+          if ($LASTEXITCODE -ne 0) { throw 'Could not list previous automatic releases.' }
+          $releases = @($json | ConvertFrom-Json | ForEach-Object { $_ } | ForEach-Object { $_ })
+          $latest = $releases | Where-Object {
+            -not $_.draft -and $_.tag_name -match '^auto-build-\d{8}T\d{6}Z-\d+-\d+$' -and
+            $_.body -match '<!-- auto-build-sha: [0-9a-f]{40} -->' -and
+            @($_.assets | Where-Object { $_.name -eq 'WandEnhancer.exe' -and $_.state -eq 'uploaded' -and $_.size -gt 0 }).Count -gt 0
+          } | Sort-Object published_at -Descending | Select-Object -First 1
+
+          "sha=$sha" >> $env:GITHUB_OUTPUT
+          $build = -not $latest -or $latest.body -notlike "*<!-- auto-build-sha: $sha -->*"
+          "build=$($build.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+          if (-not $build) { 'Already published this commit; skipping the build.' }
+
+      - name: Retry release cleanup without rebuilding
+        if: steps.sync.outputs.build == 'false'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./scripts/prune-auto-releases.ps1 -Repository '${{ github.repository }}' -Keep 2 -Apply
+
+  build:
+    needs: sync
+    if: needs.sync.outputs.build == 'true'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.sync.outputs.sha }}
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@v5
+        with:
+          version: 10.17.0
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web-panel/pnpm-lock.yaml
+
+      - name: Build unsigned executable
+        shell: pwsh
+        run: ./build.ps1 -Configuration Release
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: auto-build-exe
+          path: WandEnhancer/bin/Release/WandEnhancer.exe
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: [sync, build]
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      BUILD_SHA: ${{ needs.sync.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          sparse-checkout: scripts/prune-auto-releases.ps1
+          sparse-checkout-cone-mode: false
+
+      - name: Download executable and publish a new release
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $assetDir = Join-Path $env:RUNNER_TEMP 'auto-build'
+          gh run download $env:GITHUB_RUN_ID --name auto-build-exe --dir $assetDir
+          if ($LASTEXITCODE -ne 0) { throw 'Could not download the built executable.' }
+          $exe = Join-Path $assetDir 'WandEnhancer.exe'
+          if (-not (Test-Path -LiteralPath $exe) -or (Get-Item -LiteralPath $exe).Length -eq 0) {
+            throw 'The executable is missing or empty.'
+          }
+
+          $utc = [DateTimeOffset]::UtcNow
+          $tag = "auto-build-$($utc.ToString('yyyyMMddTHHmmssZ'))-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $title = "自动构建 $($utc.ToOffset([TimeSpan]::FromHours(8)).ToString('yyyy-MM-dd HH:mm'))（北京时间）"
+          $notes = @(
+            '从同步上游后的 master 构建，EXE 未签名。'
+            ''
+            "源码： https://github.com/$env:GH_REPO/commit/$env:BUILD_SHA"
+            "构建记录： https://github.com/$env:GH_REPO/actions/runs/$env:GITHUB_RUN_ID"
+            ''
+            '仅保留最新两次自动构建；更早的自动构建 Release 及标签会被清理。'
+            "<!-- auto-build-sha: $env:BUILD_SHA -->"
+          ) -join "`n"
+          $notesPath = Join-Path $env:RUNNER_TEMP 'auto-build-notes.md'
+          Set-Content -LiteralPath $notesPath -Value $notes -Encoding utf8
+
+          # Publish only after the asset upload succeeds, so notifications include the EXE.
+          gh release create $tag $exe --target $env:BUILD_SHA --title $title --notes-file $notesPath --draft
+          if ($LASTEXITCODE -ne 0) { throw 'Could not create the release and upload its executable; previous releases are retained.' }
+          gh release edit $tag --draft=false --latest
+          if ($LASTEXITCODE -ne 0) { throw 'Could not publish the release; previous releases are retained.' }
+          "[下载最新 EXE](https://github.com/$env:GH_REPO/releases/tag/$tag)" >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Keep only the latest two automatic releases
+        shell: pwsh
+        run: ./scripts/prune-auto-releases.ps1 -Repository $env:GH_REPO -Keep 2 -Apply

@@ -99,6 +99,49 @@ Suggestions for new features or improvements are welcome! Create an Issue descri
    ```
 6. GitHub Actions will validate the version, build the project, extract the matching changelog section, and publish a notes-only release automatically. Official releases do not attach compiled binaries.
 
+### Automatic builds in the dmcdark fork
+
+`Sync upstream and publish automatic build` checks upstream `master` hourly, at
+minute 17 (GitHub may delay scheduled runs). It also runs on pushes to `master`
+and through **Actions > Sync upstream and publish automatic build > Run workflow**.
+Enable Actions in the fork before the first run. The workflow merges upstream
+without force-resetting local commits; merge conflicts stop the run for manual
+resolution.
+
+Each new synchronized commit is built with the existing release build script.
+The unsigned `WandEnhancer.exe` is uploaded to a draft release before publication.
+Successful builds create a new `auto-build-...` release marked Latest; unchanged
+commits are skipped, and failed builds are retried on the next scheduled run.
+Only the latest two successful automatic releases and their tags are retained.
+Official releases, unrelated tags, and drafts are not deleted. Cleanup failures
+are retried on subsequent runs without rebuilding.
+
+For release notifications, select **Watch > Custom > Releases** on
+`dmcdark/Wand-Enhancer` and enable **On GitHub** notifications in your account's
+notification settings. Delivery is controlled by GitHub and your subscriptions.
+
+The built-in `GITHUB_TOKEN` is used by default. If upstream changes files under
+`.github/workflows/`, GitHub may refuse the sync because that token cannot update
+workflows. In that case, either sync manually using **Sync fork**, or configure
+the repository Actions secret `UPSTREAM_SYNC_TOKEN` with a fine-grained token
+restricted to this fork, granting **Contents: read and write** and
+**Workflows: read and write**. Only the sync step uses this optional token.
+Do not put token values in source files. Public repositories' scheduled workflows
+can be disabled by GitHub after 60 days without repository activity; re-enable
+the workflow in Actions if this occurs.
+
+To preview cleanup manually with an authenticated GitHub CLI:
+
+```powershell
+./scripts/prune-auto-releases.ps1
+```
+
+To delete automatic releases beyond the newest two, including their tags:
+
+```powershell
+./scripts/prune-auto-releases.ps1 -Apply
+```
+
 ## Code Style
 
 - Use C# naming conventions:
