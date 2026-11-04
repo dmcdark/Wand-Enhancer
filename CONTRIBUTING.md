@@ -102,7 +102,7 @@ Suggestions for new features or improvements are welcome! Create an Issue descri
 ### Automatic builds in the dmcdark fork
 
 `Sync upstream and publish automatic build` checks upstream `master` hourly, at
-minute 17 (GitHub may delay scheduled runs). It also runs on pushes to `master`
+minute 40 (GitHub may delay scheduled runs). It also runs on pushes to `master`
 and through **Actions > Sync upstream and publish automatic build > Run workflow**.
 Enable Actions in the fork before the first run. The workflow merges upstream
 without force-resetting local commits; merge conflicts stop the run for manual

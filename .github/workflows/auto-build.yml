@@ -2,7 +2,7 @@ name: Sync upstream and publish automatic build
 
 on:
   schedule:
-    - cron: '17 * * * *'
+    - cron: '40 * * * *'
   push:
     branches: [master]
   workflow_dispatch:
