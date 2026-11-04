@@ -110,6 +110,8 @@ resolution.
 
 Each new synchronized commit is built with the existing release build script.
 The unsigned `WandEnhancer.exe` is uploaded to a draft release before publication.
+Automatic releases include the upstream release notes when a published tag
+matches the executable's file version and notes are available at build time.
 Successful builds create a new `auto-build-...` release marked Latest; unchanged
 commits are skipped, and failed builds are retried on the next scheduled run.
 Only the latest two successful automatic releases and their tags are retained.

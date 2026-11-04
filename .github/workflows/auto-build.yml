@@ -71,6 +71,8 @@ jobs:
     needs: sync
     if: needs.sync.outputs.build == 'true'
     runs-on: windows-latest
+    outputs:
+      version: ${{ steps.build.outputs.version }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -88,8 +90,12 @@ jobs:
           cache-dependency-path: web-panel/pnpm-lock.yaml
 
       - name: Build unsigned executable
+        id: build
         shell: pwsh
-        run: ./build.ps1 -Configuration Release
+        run: |
+          ./build.ps1 -Configuration Release
+          $exe = Get-Item -LiteralPath 'WandEnhancer/bin/Release/WandEnhancer.exe'
+          "version=$($exe.VersionInfo.FileVersion)" >> $env:GITHUB_OUTPUT
 
       - uses: actions/upload-artifact@v6
         with:
@@ -108,6 +114,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
       BUILD_SHA: ${{ needs.sync.outputs.sha }}
+      BUILD_VERSION: ${{ needs.build.outputs.version }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -138,9 +145,20 @@ jobs:
             ''
             '仅保留最新两次自动构建；更早的自动构建 Release 及标签会被清理。'
             "<!-- auto-build-sha: $env:BUILD_SHA -->"
-          ) -join "`n"
+          )
+          if ($env:BUILD_VERSION) {
+            $upstreamJson = gh release view $env:BUILD_VERSION --repo k1tbyte/Wand-Enhancer --json body,url
+            if ($LASTEXITCODE -eq 0) {
+              $upstream = $upstreamJson | ConvertFrom-Json
+              if (-not [string]::IsNullOrWhiteSpace($upstream.body)) {
+                $notes += @('', "## 上游发布说明（$env:BUILD_VERSION）", '', "[查看上游原文]($($upstream.url))", '', $upstream.body)
+              }
+            } else {
+              Write-Warning "Could not fetch upstream release notes for $env:BUILD_VERSION. Publishing the build without them."
+            }
+          }
           $notesPath = Join-Path $env:RUNNER_TEMP 'auto-build-notes.md'
-          Set-Content -LiteralPath $notesPath -Value $notes -Encoding utf8
+          Set-Content -LiteralPath $notesPath -Value ($notes -join "`n") -Encoding utf8
 
           # Publish only after the asset upload succeeds, so notifications include the EXE.
           gh release create $tag $exe --target $env:BUILD_SHA --title $title --notes-file $notesPath --draft
